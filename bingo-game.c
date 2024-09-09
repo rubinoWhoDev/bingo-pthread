@@ -20,6 +20,7 @@ typedef struct {
   winner_e winner_type;
   bool exit;
   int last_number;
+  sem_t done;
   sem_t mutex;
 } shared_data_t;
 
@@ -74,8 +75,6 @@ void *thread_function(void *arg) {
     winner_e win_type = my_data->shared_data->winner_type;
     sem_post(&my_data->shared_data->mutex);
 
-    // notifico il dealer di aver finito di leggere
-    sem_post(&my_data->write_sem);
 
     int index_winner_card;
     bool win = false;
@@ -116,6 +115,8 @@ void *thread_function(void *arg) {
           index_winner_card = card;
       }
     }
+   
+    sem_post(&my_data->shared_data->done);
 
     // aspetto che il dealer mi dia la possibilità di segnalare la mia eventuale
     // vittoria
@@ -145,7 +146,7 @@ void *thread_function(void *arg) {
     }
 
     // notifico il dealer
-    sem_post(&my_data->read_sem);
+    sem_post(&my_data->shared_data->done);
   }
 
   // deallocazione carte
@@ -174,7 +175,7 @@ card_t *generateCard() {
     for (int j = 0; j < 5; ++j) {
       int num;
       do {
-        num = 1 + (rand() % 76);
+        num = 1 + (rand() % 75);
       } while (isIn(seen_numbers, dim, num));
       ret->numbers[i][j] = num;
       ret->found[i][j] = false;
@@ -201,6 +202,12 @@ int main(int argc, char *argv[]) {
     perror("Errore nell'inizializzazione del semaforo mutex");
     exit(EXIT_FAILURE);
   }
+
+  if (sem_init(&data->done, 0, 0) < 0){
+    perror("Errore nell'inizializzazione del semaforo done");
+    exit(EXIT_FAILURE);
+  }
+
   data->exit = false;
   data->winner_type = NO_WIN;
   data->winner_id = -1;
@@ -215,8 +222,14 @@ int main(int argc, char *argv[]) {
     arguments[i]->id = i + 1;
     arguments[i]->shared_data = data;
     arguments[i]->num_cards = atoi(argv[2]);
-    sem_init(&arguments[i]->read_sem, 0, 0);
-    sem_init(&arguments[i]->write_sem, 0, 0);
+    if (sem_init(&arguments[i]->read_sem, 0, 0) < 0){
+      perror("Errore nell'inizializzazione del semaforo read_sem");
+      exit(EXIT_FAILURE);
+    }
+    if (sem_init(&arguments[i]->write_sem, 0, 0) < 0){
+      perror("Errore nell'inizializzazione del semaforo write_sem");
+      exit(EXIT_FAILURE);
+    }
   }
 
   // creo i thread
@@ -243,7 +256,7 @@ int main(int argc, char *argv[]) {
     // notifico il thread "in fila" (curr_player) che è disponibile una carta
     sem_post(&arguments[curr_player]->read_sem);
     sem_post(&data->mutex);
-
+    
     // aspetto che il thread abbia finito
     sem_wait(&arguments[curr_player]->write_sem);
   }
@@ -261,7 +274,7 @@ int main(int argc, char *argv[]) {
 
     // riprovo fino a quando il numero non è già stato visto
     do {
-      next_number = 1 + (rand() % 76);
+      next_number = 1 + (rand() % 75);
     } while (isIn(seen_numbers, dim, next_number));
     seen_numbers[dim++] = next_number;
 
@@ -274,15 +287,16 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_players; ++i) {
       // notifico tutti i threads del nuovo numero
       sem_post(&arguments[i]->read_sem);
-
+    }
       // aspetto che i thread abbiano finito di leggere il nuovo numero
-      sem_wait(&arguments[i]->write_sem);
+    for (int i = 0; i < num_players; ++i) sem_wait(&data->done);
 
+    for (int i = 0; i < num_players; ++i)
       // notifico i thread che possono comunicarmi se hanno vinto
       sem_post(&arguments[i]->write_sem);
 
       // aspetto una notifica dei thread
-      sem_wait(&arguments[i]->read_sem);
+    for (int i = 0; i < num_players; ++i) sem_wait(&data->done);
 
       sem_wait(&data->mutex);
 
@@ -302,7 +316,6 @@ int main(int argc, char *argv[]) {
         }
       }
       sem_post(&data->mutex);
-    }
 
   } while (win_type != BINGO);
 
@@ -327,6 +340,7 @@ int main(int argc, char *argv[]) {
     free(arguments[i]);
   }
   sem_destroy(&data->mutex);
+  sem_destroy(&data->done);
   if (data->next_card != NULL)
     free(data->next_card);
   if (data->winner_card != NULL)
